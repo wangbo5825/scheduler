@@ -1,8 +1,11 @@
-module github.com/y-l-g/scheduler/module
+module github.com/wangbo5825/scheduler/module
 
 go 1.26.3
 
-require github.com/caddyserver/caddy/v2 v2.11.3
+require (
+	github.com/caddyserver/caddy/v2 v2.11.3
+	github.com/robfig/cron/v3 v3.0.1
+)
 
 require (
 	cel.dev/expr v0.25.1 // indirect

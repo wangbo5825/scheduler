@@ -57,7 +57,7 @@ jobs:
             --with github.com/dunglas/frankenphp@v1.12.3 \
             --with github.com/dunglas/frankenphp/caddy@v1.12.3 \
             --with github.com/dunglas/caddy-cbrotli@v1.0.1 \
-            --with github.com/y-l-g/scheduler/module=./module \
+            --with github.com/wangbo5825/scheduler/module=./module \
 
       - name: Run Tests (E2E)
         env:

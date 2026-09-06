@@ -1,3 +1,4 @@
 frankenphp
+.tools/
 .php-cs-fixer.cache
 vendor
