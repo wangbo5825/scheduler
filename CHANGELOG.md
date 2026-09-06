@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (wangbo5825 fork)
+## 0.1.0 (2026-09-06) — wangbo5825 fork
 
 ### Added
 

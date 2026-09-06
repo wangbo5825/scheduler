@@ -28,7 +28,7 @@ Calling a system command from the web server has three practical costs:
 
 ## Goals
 
-### v0.2 (this branch)
+### v0.1.0 (released 2026-09-06)
 
 - [x] Keep upstream `command` mode and its Caddyfile syntax backward-compatible.
 - [x] Add `mode http`: schedule HTTP/HTTPS requests.
