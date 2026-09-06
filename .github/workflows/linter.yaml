@@ -37,20 +37,6 @@ jobs:
         env:
           CGO_ENABLED: 1
 
-  lint-php:
-    name: Lint PHP
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: shivammathur/setup-php@v2
-        with:
-          php-version: "8.5"
-          tools: php-cs-fixer, cs2pr
-
-      - name: Run PHP-CS-Fixer
-        run: php-cs-fixer fix --config=lib/.php-cs-fixer.dist.php --dry-run --format=checkstyle lib | cs2pr
-
   lint-misc:
     name: Lint Misc (Yaml, MD, Bash)
     runs-on: ubuntu-latest

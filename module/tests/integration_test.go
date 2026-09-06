@@ -37,9 +37,9 @@ func TestSchedulerEndToEnd(t *testing.T) {
 		t.Fatalf("Failed to create temp trigger file: %v", err)
 	}
 	triggerPath := triggerFile.Name()
-	triggerFile.Close()
+	_ = triggerFile.Close()
 	// Ensure we clean up the file
-	defer os.Remove(triggerPath)
+	defer func() { _ = os.Remove(triggerPath) }()
 
 	// 2. Define the command with PROPER QUOTING for Caddyfile
 	var fullCommand string
@@ -72,12 +72,12 @@ func TestSchedulerEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp Caddyfile: %v", err)
 	}
-	defer os.Remove(tmpCaddyfile.Name())
+	defer func() { _ = os.Remove(tmpCaddyfile.Name()) }()
 
 	if _, err := tmpCaddyfile.WriteString(caddyfileContent); err != nil {
 		t.Fatalf("Failed to write Caddyfile: %v", err)
 	}
-	tmpCaddyfile.Close()
+	_ = tmpCaddyfile.Close()
 
 	// 4. Start Caddy
 	ctx, cancel := context.WithCancel(context.Background())

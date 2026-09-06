@@ -115,7 +115,7 @@ func (s *Scheduler) doHTTP(ctx context.Context) (int, string, error) {
 	if err != nil {
 		return 0, "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxLoggedBody+1))
 	if err != nil {

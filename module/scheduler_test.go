@@ -210,7 +210,7 @@ func appendLine(t *testing.T, path, line string) {
 	if err != nil {
 		t.Fatalf("open helper log: %v", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	if _, err := file.WriteString(line + "\n"); err != nil {
 		t.Fatalf("write helper log: %v", err)
