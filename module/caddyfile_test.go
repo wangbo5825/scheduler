@@ -118,8 +118,8 @@ pogo_scheduler {
 	if s.ShutdownGrace != caddy.Duration(45*time.Second) {
 		t.Fatalf("unexpected shutdown grace %s", time.Duration(s.ShutdownGrace))
 	}
-	if s.Job.Mode != "" || s.Job.URL != "" || len(s.Job.Command) != 0 {
+	if s.Mode != "" || s.URL != "" || len(s.Command) != 0 {
 		t.Fatalf("legacy job fields should remain empty: mode=%q url=%q command=%v",
-			s.Job.Mode, s.Job.URL, s.Job.Command)
+			s.Mode, s.URL, s.Command)
 	}
 }

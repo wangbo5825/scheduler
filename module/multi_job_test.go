@@ -110,7 +110,7 @@ func TestMultipleJobValidation(t *testing.T) {
 					Jobs:   []*Job{{Name: "one", Command: []string{"true"}}},
 					logger: discardLogger(),
 				}
-				s.Job.URL = "http://127.0.0.1:8080/legacy"
+				s.URL = "http://127.0.0.1:8080/legacy"
 				return s
 			}(),
 			want: "top-level url cannot be combined with jobs",
@@ -177,7 +177,7 @@ func TestSchedulerJSONMultiJobAndLegacyCompatibility(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"command":["php","artisan","schedule:run"]}`), &decodedLegacy); err != nil {
 		t.Fatalf("decode legacy config: %v", err)
 	}
-	if len(decodedLegacy.Job.Command) != 3 || decodedLegacy.Job.Command[1] != "artisan" {
-		t.Fatalf("unexpected decoded legacy command: %v", decodedLegacy.Job.Command)
+	if len(decodedLegacy.Command) != 3 || decodedLegacy.Command[1] != "artisan" {
+		t.Fatalf("unexpected decoded legacy command: %v", decodedLegacy.Command)
 	}
 }
