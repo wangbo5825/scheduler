@@ -19,9 +19,9 @@ func TestDefaultOverlapAllowsConcurrentRuns(t *testing.T) {
 	s.ShutdownGrace = caddy.Duration(time.Second)
 	requireStart(t, s)
 
-	s.startRun()
-	waitForContent(t, logPath, "START", time.Second)
-	s.startRun()
+	s.startRun(s.jobList[0])
+	waitForContent(t, logPath, "START", 3*time.Second)
+	s.startRun(s.jobList[0])
 
 	if err := s.Stop(); err != nil {
 		t.Fatalf("Stop failed: %v", err)
@@ -44,9 +44,9 @@ func TestOverlapSkipSkipsActiveRun(t *testing.T) {
 	s.ShutdownGrace = caddy.Duration(time.Second)
 	requireStart(t, s)
 
-	s.startRun()
-	waitForContent(t, logPath, "START", time.Second)
-	s.startRun()
+	s.startRun(s.jobList[0])
+	waitForContent(t, logPath, "START", 3*time.Second)
+	s.startRun(s.jobList[0])
 
 	if err := s.Stop(); err != nil {
 		t.Fatalf("Stop failed: %v", err)
@@ -69,8 +69,8 @@ func TestOverlapAllowStartsConcurrentRuns(t *testing.T) {
 	s.ShutdownGrace = caddy.Duration(time.Second)
 	requireStart(t, s)
 
-	s.startRun()
-	s.startRun()
+	s.startRun(s.jobList[0])
+	s.startRun(s.jobList[0])
 
 	if err := s.Stop(); err != nil {
 		t.Fatalf("Stop failed: %v", err)
@@ -92,8 +92,8 @@ func TestShutdownGraceAllowsActiveRunToFinish(t *testing.T) {
 	s.ShutdownGrace = caddy.Duration(time.Second)
 	requireStart(t, s)
 
-	s.startRun()
-	waitForContent(t, logPath, "START", time.Second)
+	s.startRun(s.jobList[0])
+	waitForContent(t, logPath, "START", 3*time.Second)
 
 	if err := s.Stop(); err != nil {
 		t.Fatalf("Stop failed: %v", err)
@@ -112,8 +112,8 @@ func TestShutdownGraceCancelsActiveRun(t *testing.T) {
 	s.ShutdownGrace = caddy.Duration(100 * time.Millisecond)
 	requireStart(t, s)
 
-	s.startRun()
-	waitForContent(t, logPath, "START", time.Second)
+	s.startRun(s.jobList[0])
+	waitForContent(t, logPath, "START", 3*time.Second)
 
 	started := time.Now()
 	if err := s.Stop(); err != nil {
@@ -128,6 +128,50 @@ func TestShutdownGraceCancelsActiveRun(t *testing.T) {
 	content := readFile(t, logPath)
 	if strings.Contains(content, "DONE") {
 		t.Fatalf("expected command to be cancelled before completion, got %q", content)
+	}
+}
+
+func TestMultipleJobsRunIndependently(t *testing.T) {
+	firstLog := tempLogPath(t)
+	secondLog := tempLogPath(t)
+
+	s := &Scheduler{
+		Jobs: []*Job{
+			{
+				Name:    "first",
+				Command: helperCommand("sleep-write", firstLog, "50ms"),
+				Timeout: caddy.Duration(5 * time.Second),
+				Overlap: OverlapSkip,
+			},
+			{
+				Name:    "second",
+				Command: helperCommand("sleep-write", secondLog, "50ms"),
+				Timeout: caddy.Duration(5 * time.Second),
+				Overlap: OverlapSkip,
+			},
+		},
+		ShutdownGrace: caddy.Duration(time.Second),
+		logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	requireStart(t, s)
+
+	if len(s.jobList) != 2 {
+		t.Fatalf("expected two prepared jobs, got %d", len(s.jobList))
+	}
+	s.startRun(s.jobList[0])
+	s.startRun(s.jobList[1])
+
+	waitForContent(t, firstLog, "START", 3*time.Second)
+	waitForContent(t, secondLog, "START", 3*time.Second)
+	if err := s.Stop(); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+
+	if got := strings.Count(readFile(t, firstLog), "DONE"); got != 1 {
+		t.Fatalf("expected first job to finish once, got %d", got)
+	}
+	if got := strings.Count(readFile(t, secondLog), "DONE"); got != 1 {
+		t.Fatalf("expected second job to finish once, got %d", got)
 	}
 }
 
@@ -158,9 +202,11 @@ func newTestScheduler(t *testing.T, command []string) *Scheduler {
 	t.Helper()
 
 	return &Scheduler{
-		Command: command,
-		Timeout: caddy.Duration(5 * time.Second),
-		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Job: Job{
+			Command: command,
+			Timeout: caddy.Duration(5 * time.Second),
+		},
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }
 

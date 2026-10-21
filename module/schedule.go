@@ -12,16 +12,16 @@ import (
 // Otherwise the interval grid is anchored to the Unix epoch, which produces the
 // familiar wall-clock-aligned behavior for common intervals: the default 1m
 // fires at :00 of every minute, 5m fires at :00/:05/:10/..., and so on.
-func (s *Scheduler) nextRun(now time.Time) time.Time {
-	if s.cronSchedule != nil {
-		next := s.cronSchedule.Next(now)
+func (j *Job) nextRun(now time.Time) time.Time {
+	if j.cronSchedule != nil {
+		next := j.cronSchedule.Next(now)
 		if !next.After(now) {
 			return now.Add(time.Second)
 		}
 		return next
 	}
 
-	interval := time.Duration(s.Interval)
+	interval := time.Duration(j.Interval)
 	if interval <= 0 {
 		interval = defaultInterval
 	}

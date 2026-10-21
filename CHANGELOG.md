@@ -20,7 +20,16 @@
     `@every 5m`, and `CRON_TZ=` timezone prefix) via `robfig/cron`.
 - `mode` is inferred when omitted: `http` when `url` is set, otherwise
   `command`, so existing command-only Caddyfiles remain valid.
-- Unit tests for the HTTP mode, Caddyfile parsing, scheduling, and validation.
+- **Multiple named jobs** in one scheduler instance:
+  - Caddyfile: repeat `job <name> { ... }` blocks.
+  - JSON: use the `jobs` array.
+  - Each job has an independent mode, target, schedule, timeout, and overlap
+    policy.
+  - Job names must be unique; the legacy flat single-job configuration remains
+    fully supported.
+  - `shutdown_grace` remains global for all active jobs.
+- Unit tests for the HTTP mode, multi-job parsing, scheduling, defaults, and
+  validation.
 
 ### Unchanged behavior
 

@@ -14,16 +14,25 @@ import (
 
 const maxLoggedBody = 4 << 10 // 4 KiB
 
-func (s *Scheduler) runCommand(ctx context.Context) {
+func (j *Job) execute(ctx context.Context) {
+	switch j.Mode {
+	case ModeHTTP:
+		j.runHTTP(ctx)
+	default:
+		j.runCommand(ctx)
+	}
+}
+
+func (j *Job) runCommand(ctx context.Context) {
 	started := time.Now()
-	s.logger.Info("scheduler command started",
-		slog.Any("command", s.Command),
-		slog.String("dir", s.Dir),
+	j.logger.Info("scheduler command started",
+		slog.Any("command", j.Command),
+		slog.String("dir", j.Dir),
 	)
 
-	cmd := exec.CommandContext(ctx, s.Command[0], s.Command[1:]...)
-	if s.Dir != "" {
-		cmd.Dir = s.Dir
+	cmd := exec.CommandContext(ctx, j.Command[0], j.Command[1:]...)
+	if j.Dir != "" {
+		cmd.Dir = j.Dir
 	}
 
 	out, err := cmd.CombinedOutput()
@@ -37,29 +46,29 @@ func (s *Scheduler) runCommand(ctx context.Context) {
 		}
 		switch {
 		case errors.Is(ctx.Err(), context.DeadlineExceeded):
-			s.logger.Error("scheduler command timed out", attrs...)
+			j.logger.Error("scheduler command timed out", attrs...)
 		case errors.Is(ctx.Err(), context.Canceled):
-			s.logger.Warn("scheduler command cancelled", attrs...)
+			j.logger.Warn("scheduler command cancelled", attrs...)
 		default:
-			s.logger.Error("scheduler command failed", attrs...)
+			j.logger.Error("scheduler command failed", attrs...)
 		}
 		return
 	}
 
 	if len(out) > 0 {
-		s.logger.Info("scheduler command output", slog.String("output", string(out)))
+		j.logger.Info("scheduler command output", slog.String("output", string(out)))
 	}
-	s.logger.Info("scheduler command finished", slog.Duration("duration", duration))
+	j.logger.Info("scheduler command finished", slog.Duration("duration", duration))
 }
 
-func (s *Scheduler) runHTTP(ctx context.Context) {
+func (j *Job) runHTTP(ctx context.Context) {
 	started := time.Now()
-	s.logger.Info("scheduler http request started",
-		slog.String("method", s.Method),
-		slog.String("url", s.URL),
+	j.logger.Info("scheduler http request started",
+		slog.String("method", j.Method),
+		slog.String("url", j.URL),
 	)
 
-	status, body, err := s.doHTTP(ctx)
+	status, body, err := j.doHTTP(ctx)
 	duration := time.Since(started)
 
 	if err != nil {
@@ -72,16 +81,16 @@ func (s *Scheduler) runHTTP(ctx context.Context) {
 		}
 		switch {
 		case errors.Is(ctx.Err(), context.DeadlineExceeded):
-			s.logger.Error("scheduler http request timed out", attrs...)
+			j.logger.Error("scheduler http request timed out", attrs...)
 		case errors.Is(ctx.Err(), context.Canceled):
-			s.logger.Warn("scheduler http request cancelled", attrs...)
+			j.logger.Warn("scheduler http request cancelled", attrs...)
 		default:
-			s.logger.Error("scheduler http request failed", attrs...)
+			j.logger.Error("scheduler http request failed", attrs...)
 		}
 		return
 	}
 
-	s.logger.Info("scheduler http request finished",
+	j.logger.Info("scheduler http request finished",
 		slog.Int("status", status),
 		slog.Duration("duration", duration),
 	)
@@ -90,23 +99,23 @@ func (s *Scheduler) runHTTP(ctx context.Context) {
 // doHTTP performs a single HTTP(S) request and reports the response status.
 // It returns an error only for transport-level failures, non-2xx responses, or
 // an explicit expect_status mismatch.
-func (s *Scheduler) doHTTP(ctx context.Context) (int, string, error) {
+func (j *Job) doHTTP(ctx context.Context) (int, string, error) {
 	var bodyReader io.Reader
-	if s.Body != "" {
-		bodyReader = strings.NewReader(s.Body)
+	if j.Body != "" {
+		bodyReader = strings.NewReader(j.Body)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, s.Method, s.URL, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, j.Method, j.URL, bodyReader)
 	if err != nil {
 		return 0, "", fmt.Errorf("create request: %w", err)
 	}
-	for name, values := range s.Headers {
+	for name, values := range j.Headers {
 		for _, value := range values {
 			req.Header.Add(name, value)
 		}
 	}
 
-	client := s.httpClient
+	client := j.httpClient
 	if client == nil {
 		client = http.DefaultClient
 	}
@@ -126,10 +135,10 @@ func (s *Scheduler) doHTTP(ctx context.Context) (int, string, error) {
 		body = truncate(body, maxLoggedBody)
 	}
 
-	if s.ExpectStatus != 0 {
-		if resp.StatusCode != s.ExpectStatus {
+	if j.ExpectStatus != 0 {
+		if resp.StatusCode != j.ExpectStatus {
 			return resp.StatusCode, body, fmt.Errorf(
-				"unexpected status %d, expected %d", resp.StatusCode, s.ExpectStatus)
+				"unexpected status %d, expected %d", resp.StatusCode, j.ExpectStatus)
 		}
 		return resp.StatusCode, body, nil
 	}

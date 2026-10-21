@@ -4,7 +4,8 @@ A small [Caddy](https://caddyserver.com) / [FrankenPHP](https://frankenphp.dev)
 module that acts as an embedded cron trigger for constrained or single-binary
 PHP deployments.
 
-It runs a lightweight Go ticker and fires a job on schedule. A job is either:
+It runs lightweight Go timers and fires one or more jobs on schedule. Each job
+is either:
 
 1. **A command** (the original behavior), such as
    `php artisan schedule:run`; or
@@ -75,8 +76,8 @@ Then copy your app and `Caddyfile` into the runner image as usual.
 
 ### 2. Configure Caddyfile
 
-Add a `pogo_scheduler` block to your Caddyfile. Exactly one job type is used per
-scheduler instance: either a command or an HTTP(S) request.
+Add a `pogo_scheduler` block to your Caddyfile. A scheduler can run one legacy
+single job, or multiple named jobs with independent schedules and options.
 
 #### Mode 1: command (original behavior)
 
@@ -139,10 +140,78 @@ When `mode` is omitted but `url` is set, the mode is inferred as `http`.
 `mode` is mutually exclusive with the other job type: setting both `command`
 and `url` (or `command` together with `mode http`) is a configuration error.
 
+### Multiple jobs
+
+Use `job <name> { ... }` blocks to run multiple jobs in one Caddy process.
+Each job has its own mode, target, schedule, timeout, and overlap policy:
+
+```caddy
+{
+    pogo_scheduler {
+        shutdown_grace 30s
+
+        job backup {
+            mode     http
+            url      http://127.0.0.1:80/internal/backup
+            method   POST
+            schedule "0 3 * * *"
+            timeout  10m
+            overlap  skip
+        }
+
+        job cleanup {
+            mode     command
+            command  php artisan cleanup
+            dir      /var/www/html
+            interval 5m
+            timeout  2m
+            overlap  skip
+        }
+
+        job heartbeat {
+            mode     http
+            url      http://127.0.0.1:80/internal/heartbeat
+            interval 30s
+        }
+    }
+}
+```
+
+Job names must be unique. `shutdown_grace` is global: during Caddy shutdown,
+all active jobs share that grace period, after which remaining runs are
+cancelled. Top-level job options cannot be mixed with `job` blocks; put all
+job-specific options inside each block.
+
+In JSON, the same configuration is represented with a `jobs` array:
+
+```json
+{
+  "jobs": [
+    {
+      "name": "backup",
+      "mode": "http",
+      "url": "http://127.0.0.1:80/internal/backup",
+      "method": "POST",
+      "schedule": "0 3 * * *",
+      "timeout": "10m",
+      "overlap": "skip"
+    },
+    {
+      "name": "cleanup",
+      "mode": "command",
+      "command": ["php", "artisan", "cleanup"],
+      "interval": "5m"
+    }
+  ],
+  "shutdown_grace": "30s"
+}
+```
+
 ## Configuration reference
 
 | Caddyfile directive | JSON field | Description |
 | --- | --- | --- |
+| `job <name> { ... }` | `jobs[]` | A named job with independent mode, target, schedule, timeout, and overlap options. |
 | `mode command\|http` | `mode` | Job type. Inferred: `http` if `url` is set, otherwise `command`. |
 | `command ...` | `command` | Command to run (command mode only). Default: `php artisan schedule:run`. |
 | `dir ...` | `dir` | Working directory for the command (command mode only). |
@@ -156,7 +225,7 @@ and `url` (or `command` together with `mode http`) is a configuration error.
 | `schedule "cron"` | `schedule` | Cron expression; overrides `interval` when set. |
 | `timeout D` | `timeout` | Per-run timeout. Default `5m`. |
 | `overlap allow\|skip` | `overlap` | `skip` drops a tick while the previous run is still active. Default `allow`. |
-| `shutdown_grace D` | `shutdown_grace` | How long an active run may finish during shutdown. Default `30s`. |
+| `shutdown_grace D` | `shutdown_grace` | Global grace period for active runs during shutdown. Default `30s`. |
 
 ### Scheduling
 
@@ -208,17 +277,17 @@ Output is logged on failure and on successful output-producing runs.
 
 ## How It Works
 
-1. **Scheduling goroutine**: the module computes the next tick from the
-   configured `interval` (wall-clock-aligned) or cron `schedule`, then sleeps
-   until that instant.
+1. **Scheduling goroutines**: each job computes its next tick from its own
+   `interval` (wall-clock-aligned) or cron `schedule`, then sleeps until that
+   instant.
 2. **Dispatch**: at each tick the module starts one run in a goroutine:
    - `command` mode executes the command as a subprocess bounded by `timeout`;
    - `http` mode performs an HTTP(S) request bounded by the same `timeout`.
-3. **Overlap control**: with `overlap skip`, a tick is skipped while the
-   previous run is active (shared by both modes).
+3. **Overlap control**: each job tracks its own active run; with
+   `overlap skip`, a tick is skipped while that job's previous run is active.
 4. **Graceful shutdown**: on Caddy reload/shutdown, no new runs are started.
-   Active runs may finish within `shutdown_grace`; after that they are
-   cancelled (process killed / HTTP request context cancelled).
+   Active runs across all jobs may finish within the global `shutdown_grace`;
+   after that they are cancelled.
 
 ## Security notes
 

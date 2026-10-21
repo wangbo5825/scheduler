@@ -2,12 +2,10 @@ package scheduler
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,7 +15,6 @@ import (
 	"github.com/caddyserver/caddy/v2/caddyconfig"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
-	"github.com/robfig/cron/v3"
 )
 
 const (
@@ -35,9 +32,9 @@ func init() {
 	httpcaddyfile.RegisterGlobalOption("pogo_scheduler", parseGlobalOption)
 }
 
-// Scheduler is a Caddy/FrankenPHP app that periodically runs a job. A job is
-// either an external command (the historical behavior) or a native HTTP(S)
-// request (a new addition).
+// Scheduler is a Caddy/FrankenPHP app that periodically runs one or more
+// named jobs. Each job can execute an external command or perform a native
+// HTTP(S) request.
 //
 // The HTTP mode deliberately avoids spawning system processes from inside the
 // web server. Scheduled work is pushed over the existing request pipeline of
@@ -45,45 +42,25 @@ func init() {
 // other HTTP service. That keeps the web server free of shell access and makes
 // each tick cheap: no process startup per run, and no host command surface.
 type Scheduler struct {
-	// Mode selects the job type. Supported values are "command" and "http".
-	// When empty it is inferred: "http" when URL is set, otherwise "command".
-	Mode string `json:"mode,omitempty"`
+	// Jobs defines named jobs. When empty, the legacy single-job fields
+	// embedded below (mode, command, url, interval, schedule, ...) are used.
+	Jobs []*Job `json:"jobs,omitempty"`
 
-	// Command mode options (kept compatible with upstream pogo_scheduler).
-	Command []string `json:"command,omitempty"`
-	Dir     string   `json:"dir,omitempty"`
+	// Job keeps the original flat single-job configuration backward-compatible.
+	Job
 
-	// HTTP mode options.
-	URL                string      `json:"url,omitempty"`
-	Method             string      `json:"method,omitempty"`
-	Headers            http.Header `json:"headers,omitempty"`
-	Body               string      `json:"body,omitempty"`
-	ExpectStatus       int         `json:"expect_status,omitempty"`
-	InsecureSkipVerify bool        `json:"insecure_skip_verify,omitempty"`
-
-	// Scheduling options.
-	// Interval (default 1m) is the period between ticks on a wall-clock-aligned
-	// grid. Schedule, when set, is a cron expression (standard 5-field syntax,
-	// descriptors such as "@every 5m", and the optional "CRON_TZ=Zone" prefix)
-	// and takes precedence over Interval.
-	Interval caddy.Duration `json:"interval,omitempty"`
-	Schedule string         `json:"schedule,omitempty"`
-
-	// Common execution options.
-	Timeout       caddy.Duration `json:"timeout,omitempty"`
-	Overlap       string         `json:"overlap,omitempty"`
+	// ShutdownGrace is the maximum time active runs across all jobs may
+	// finish during shutdown before they are cancelled.
 	ShutdownGrace caddy.Duration `json:"shutdown_grace,omitempty"`
 
 	logger       *slog.Logger
-	cronSchedule cron.Schedule
-	httpClient   *http.Client
+	jobList      []*Job
 	scheduleCtx  context.Context
 	cancelLoop   context.CancelFunc
 	runCtx       context.Context
 	cancelRuns   context.CancelFunc
 	mu           sync.Mutex
 	stopping     bool
-	active       bool
 	wg           sync.WaitGroup
 	cancelRunsMu sync.Mutex
 }
@@ -106,94 +83,81 @@ func (s *Scheduler) setDefaults(logger *slog.Logger) error {
 	if s.logger == nil {
 		s.logger = slog.Default()
 	}
-
-	if s.Mode == "" {
-		if s.URL != "" {
-			s.Mode = ModeHTTP
-		} else {
-			s.Mode = ModeCommand
-		}
-	}
-
-	switch s.Mode {
-	case ModeCommand:
-		if s.URL != "" {
-			return fmt.Errorf("url %q cannot be combined with mode %q", s.URL, ModeCommand)
-		}
-		if len(s.Command) == 0 {
-			s.Command = []string{"php", "artisan", "schedule:run"}
-		}
-	case ModeHTTP:
-		if len(s.Command) > 0 {
-			return fmt.Errorf("command %v cannot be combined with mode %q", s.Command, ModeHTTP)
-		}
-		if s.URL == "" {
-			return errors.New("mode \"http\" requires a url")
-		}
-		parsed, err := url.Parse(s.URL)
-		if err != nil {
-			return fmt.Errorf("invalid url %q: %w", s.URL, err)
-		}
-		if parsed.Scheme != "http" && parsed.Scheme != "https" {
-			return fmt.Errorf("invalid url %q: scheme must be http or https", s.URL)
-		}
-		if parsed.Host == "" {
-			return fmt.Errorf("invalid url %q: host is required", s.URL)
-		}
-		if s.Method == "" {
-			s.Method = http.MethodGet
-		}
-		s.Method = strings.ToUpper(s.Method)
-		if _, err := http.NewRequest(s.Method, s.URL, nil); err != nil {
-			return fmt.Errorf("invalid method %q: %w", s.Method, err)
-		}
-		if s.ExpectStatus < 0 {
-			return fmt.Errorf("invalid expect_status %d: must not be negative", s.ExpectStatus)
-		}
-		if s.InsecureSkipVerify {
-			s.logger.Warn("insecure_skip_verify is enabled; TLS certificates will not be verified",
-				slog.String("url", s.URL),
-			)
-		}
-		transport := http.DefaultTransport.(*http.Transport).Clone()
-		if s.InsecureSkipVerify {
-			transport.TLSClientConfig = &tls.Config{
-				InsecureSkipVerify: true,
-				MinVersion:         tls.VersionTLS12,
-			}
-		}
-		s.httpClient = &http.Client{Transport: transport}
-	default:
-		return fmt.Errorf("invalid mode %q: expected %q or %q", s.Mode, ModeCommand, ModeHTTP)
-	}
-
-	if s.Interval <= 0 {
-		s.Interval = caddy.Duration(defaultInterval)
-	}
-	if s.Interval < caddy.Duration(time.Second) {
-		return fmt.Errorf("invalid interval %s: must be at least 1s", time.Duration(s.Interval))
-	}
-	if s.Schedule != "" {
-		schedule, err := cron.ParseStandard(s.Schedule)
-		if err != nil {
-			return fmt.Errorf("invalid schedule %q: %w", s.Schedule, err)
-		}
-		s.cronSchedule = schedule
-	}
-
-	if s.Timeout <= 0 {
-		s.Timeout = caddy.Duration(5 * time.Minute)
-	}
-	if s.Overlap == "" {
-		s.Overlap = OverlapAllow
-	}
-	if s.Overlap != OverlapSkip && s.Overlap != OverlapAllow {
-		return fmt.Errorf("invalid overlap %q: expected %q or %q", s.Overlap, OverlapSkip, OverlapAllow)
-	}
 	if s.ShutdownGrace <= 0 {
 		s.ShutdownGrace = caddy.Duration(30 * time.Second)
 	}
 
+	if len(s.Jobs) == 0 {
+		if s.Name == "" {
+			s.Name = "default"
+		}
+		if err := s.Job.setDefaults(s.logger); err != nil {
+			return fmt.Errorf("job %q: %w", s.Name, err)
+		}
+		s.jobList = []*Job{&s.Job}
+		return nil
+	}
+
+	if err := s.validateLegacyJobUnused(); err != nil {
+		return err
+	}
+
+	seen := make(map[string]struct{}, len(s.Jobs))
+	jobList := make([]*Job, 0, len(s.Jobs))
+	for i, job := range s.Jobs {
+		if job == nil {
+			return fmt.Errorf("job %d: definition is null", i)
+		}
+		job.Name = strings.TrimSpace(job.Name)
+		if job.Name == "" {
+			return fmt.Errorf("job %d: name is required", i)
+		}
+		if _, exists := seen[job.Name]; exists {
+			return fmt.Errorf("duplicate job name %q", job.Name)
+		}
+		seen[job.Name] = struct{}{}
+
+		if err := job.setDefaults(s.logger); err != nil {
+			return fmt.Errorf("job %q: %w", job.Name, err)
+		}
+		jobList = append(jobList, job)
+	}
+	s.jobList = jobList
+	return nil
+}
+
+func (s *Scheduler) validateLegacyJobUnused() error {
+	job := &s.Job
+	switch {
+	case job.Name != "":
+		return errors.New("top-level job options cannot be combined with jobs; move them into a job block")
+	case job.Mode != "":
+		return errors.New("top-level mode cannot be combined with jobs; move it into a job block")
+	case len(job.Command) > 0:
+		return errors.New("top-level command cannot be combined with jobs; move it into a job block")
+	case job.Dir != "":
+		return errors.New("top-level dir cannot be combined with jobs; move it into a job block")
+	case job.URL != "":
+		return errors.New("top-level url cannot be combined with jobs; move it into a job block")
+	case job.Method != "":
+		return errors.New("top-level method cannot be combined with jobs; move it into a job block")
+	case len(job.Headers) > 0:
+		return errors.New("top-level header cannot be combined with jobs; move it into a job block")
+	case job.Body != "":
+		return errors.New("top-level body cannot be combined with jobs; move it into a job block")
+	case job.ExpectStatus != 0:
+		return errors.New("top-level expect_status cannot be combined with jobs; move it into a job block")
+	case job.InsecureSkipVerify:
+		return errors.New("top-level insecure_skip_verify cannot be combined with jobs; move it into a job block")
+	case job.Interval != 0:
+		return errors.New("top-level interval cannot be combined with jobs; move it into a job block")
+	case job.Schedule != "":
+		return errors.New("top-level schedule cannot be combined with jobs; move it into a job block")
+	case job.Timeout != 0:
+		return errors.New("top-level timeout cannot be combined with jobs; move it into a job block")
+	case job.Overlap != "":
+		return errors.New("top-level overlap cannot be combined with jobs; move it into a job block")
+	}
 	return nil
 }
 
@@ -207,33 +171,25 @@ func (s *Scheduler) Start() error {
 
 	s.mu.Lock()
 	s.stopping = false
-	s.active = false
-	s.wg.Add(1)
+	for _, job := range s.jobList {
+		job.mu.Lock()
+		job.active = false
+		job.mu.Unlock()
+	}
+	s.wg.Add(len(s.jobList))
 	s.mu.Unlock()
 
-	go s.loop()
+	for _, job := range s.jobList {
+		go s.loopJob(job)
+	}
 
-	attrs := []any{
-		slog.String("mode", s.Mode),
-		slog.String("overlap", s.Overlap),
-		slog.Duration("interval", time.Duration(s.Interval)),
+	s.logger.Info("scheduler started",
+		slog.Int("jobs", len(s.jobList)),
+		slog.Duration("shutdown_grace", time.Duration(s.ShutdownGrace)),
+	)
+	for _, job := range s.jobList {
+		job.logConfig()
 	}
-	if s.Schedule != "" {
-		attrs = append(attrs, slog.String("schedule", s.Schedule))
-	}
-	switch s.Mode {
-	case ModeHTTP:
-		attrs = append(attrs,
-			slog.String("method", s.Method),
-			slog.String("url", s.URL),
-		)
-	default:
-		attrs = append(attrs,
-			slog.Any("command", s.Command),
-			slog.String("dir", s.Dir),
-		)
-	}
-	s.logger.Info("scheduler started", attrs...)
 	return nil
 }
 
@@ -264,16 +220,16 @@ func (s *Scheduler) Stop() error {
 		<-done
 	}
 
-	s.logger.Info("scheduler stopped")
+	s.logger.Info("scheduler stopped", slog.Int("jobs", len(s.jobList)))
 	return nil
 }
 
-func (s *Scheduler) loop() {
+func (s *Scheduler) loopJob(job *Job) {
 	defer s.wg.Done()
 
 	for {
 		now := time.Now()
-		next := s.nextRun(now)
+		next := job.nextRun(now)
 		timer := time.NewTimer(next.Sub(now))
 
 		select {
@@ -281,51 +237,50 @@ func (s *Scheduler) loop() {
 			timer.Stop()
 			return
 		case <-timer.C:
-			s.logger.Info("scheduler tick", slog.Time("scheduled_at", next))
-			s.startRun()
+			job.logger.Info("scheduler tick", slog.Time("scheduled_at", next))
+			s.startRun(job)
 		}
 	}
 }
 
-func (s *Scheduler) startRun() {
+func (s *Scheduler) startRun(job *Job) {
 	s.mu.Lock()
 	if s.stopping {
 		s.mu.Unlock()
 		return
 	}
-	if s.Overlap == OverlapSkip && s.active {
+
+	job.mu.Lock()
+	if job.Overlap == OverlapSkip && job.active {
+		job.mu.Unlock()
 		s.mu.Unlock()
-		s.logger.Warn("scheduler skipped: previous run still active")
+		job.logger.Warn("scheduler skipped: previous run still active")
 		return
 	}
-	if s.Overlap == OverlapSkip {
-		s.active = true
+	if job.Overlap == OverlapSkip {
+		job.active = true
 	}
 	s.wg.Add(1)
+	job.mu.Unlock()
 	s.mu.Unlock()
 
-	go s.run()
+	go s.runJob(job)
 }
 
-func (s *Scheduler) run() {
+func (s *Scheduler) runJob(job *Job) {
 	defer s.wg.Done()
-	if s.Overlap == OverlapSkip {
+	if job.Overlap == OverlapSkip {
 		defer func() {
-			s.mu.Lock()
-			s.active = false
-			s.mu.Unlock()
+			job.mu.Lock()
+			job.active = false
+			job.mu.Unlock()
 		}()
 	}
 
-	ctx, cancel := context.WithTimeout(s.runCtx, time.Duration(s.Timeout))
+	ctx, cancel := context.WithTimeout(s.runCtx, time.Duration(job.Timeout))
 	defer cancel()
 
-	switch s.Mode {
-	case ModeHTTP:
-		s.runHTTP(ctx)
-	default:
-		s.runCommand(ctx)
-	}
+	job.execute(ctx)
 }
 
 func (s *Scheduler) cancelRunsNow() {
@@ -337,124 +292,60 @@ func (s *Scheduler) cancelRunsNow() {
 }
 
 // UnmarshalCaddyfile sets up the module from Caddyfile tokens.
-// Syntax:
+//
+// Legacy single-job syntax is supported unchanged:
 //
 //	pogo_scheduler {
-//	    mode command|http
 //	    command php artisan schedule:run
-//	    dir /var/www/html
-//	    url https://localhost/artisan/schedule
-//	    method POST
-//	    header Authorization "Bearer secret"
-//	    header Content-Type application/json
-//	    body "{\"source\":\"caddy\"}"
-//	    expect_status 200
-//	    insecure_skip_verify false
-//	    interval 5m
-//	    schedule "*/5 * * * *"
-//	    timeout 2m
-//	    overlap allow
+//	    interval 1m
+//	}
+//
+// Multiple named jobs use job blocks:
+//
+//	pogo_scheduler {
 //	    shutdown_grace 30s
+//
+//	    job backup {
+//	        mode     http
+//	        url      http://127.0.0.1/internal/backup
+//	        schedule "0 3 * * *"
+//	        timeout  10m
+//	    }
+//
+//	    job cleanup {
+//	        mode     command
+//	        command  php artisan cleanup
+//	        dir      /var/www/html
+//	        interval 5m
+//	        overlap  skip
+//	    }
 //	}
 func (s *Scheduler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	for d.Next() {
-		for d.NextBlock(0) {
+		for nesting := d.Nesting(); d.NextBlock(nesting); {
 			switch d.Val() {
-			case "mode":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				s.Mode = d.Val()
-			case "command":
-				s.Command = d.RemainingArgs()
-				if len(s.Command) == 0 {
-					return d.ArgErr()
-				}
-			case "dir":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				s.Dir = d.Val()
-			case "url":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				s.URL = d.Val()
-			case "method":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				s.Method = d.Val()
-			case "header":
+			case "job":
 				if !d.NextArg() {
 					return d.ArgErr()
 				}
 				name := d.Val()
-				values := d.RemainingArgs()
-				if len(values) == 0 {
+				if d.NextArg() {
 					return d.ArgErr()
 				}
-				if s.Headers == nil {
-					s.Headers = make(http.Header)
+
+				job := &Job{Name: name}
+				jobNesting := d.Nesting()
+				for d.NextBlock(jobNesting) {
+					handled, err := parseJobDirective(d, job)
+					if err != nil {
+						return err
+					}
+					if !handled {
+						return d.Errf("unrecognized job subdirective: %s", d.Val())
+					}
 				}
-				for _, value := range values {
-					s.Headers.Add(name, value)
-				}
-			case "body":
-				parts := d.RemainingArgs()
-				if len(parts) == 0 {
-					return d.ArgErr()
-				}
-				s.Body = strings.Join(parts, " ")
-			case "expect_status":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				status, err := strconv.Atoi(d.Val())
-				if err != nil {
-					return d.Errf("invalid expect_status %q: %v", d.Val(), err)
-				}
-				s.ExpectStatus = status
-			case "insecure_skip_verify":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				skip, err := strconv.ParseBool(d.Val())
-				if err != nil {
-					return d.Errf("invalid insecure_skip_verify %q: %v", d.Val(), err)
-				}
-				s.InsecureSkipVerify = skip
-			case "interval":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				dur, err := caddy.ParseDuration(d.Val())
-				if err != nil {
-					return d.Errf("invalid duration %s: %v", d.Val(), err)
-				}
-				s.Interval = caddy.Duration(dur)
-			case "schedule":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				s.Schedule = d.Val()
-			case "timeout":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				dur, err := caddy.ParseDuration(d.Val())
-				if err != nil {
-					return d.Errf("invalid duration %s: %v", d.Val(), err)
-				}
-				s.Timeout = caddy.Duration(dur)
-			case "overlap":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				s.Overlap = d.Val()
-				if s.Overlap != OverlapSkip && s.Overlap != OverlapAllow {
-					return d.Errf("invalid overlap %q: expected %q or %q", s.Overlap, OverlapSkip, OverlapAllow)
-				}
+				s.Jobs = append(s.Jobs, job)
+
 			case "shutdown_grace":
 				if !d.NextArg() {
 					return d.ArgErr()
@@ -464,12 +355,155 @@ func (s *Scheduler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.Errf("invalid duration %s: %v", d.Val(), err)
 				}
 				s.ShutdownGrace = caddy.Duration(dur)
+
 			default:
-				return d.Errf("unrecognized subdirective: %s", d.Val())
+				handled, err := parseJobDirective(d, &s.Job)
+				if err != nil {
+					return err
+				}
+				if !handled {
+					return d.Errf("unrecognized subdirective: %s", d.Val())
+				}
 			}
 		}
 	}
 	return nil
+}
+
+// parseJobDirective parses one job-level directive. The dispenser must be
+// positioned on the directive token itself. The bool reports whether the
+// directive was recognized.
+func parseJobDirective(d *caddyfile.Dispenser, job *Job) (bool, error) {
+	switch d.Val() {
+	case "name":
+		value, err := singleArg(d)
+		if err != nil {
+			return true, err
+		}
+		if job.Name != "" {
+			return true, d.Err("job name already specified")
+		}
+		job.Name = value
+	case "mode":
+		value, err := singleArg(d)
+		if err != nil {
+			return true, err
+		}
+		job.Mode = value
+	case "command":
+		job.Command = d.RemainingArgs()
+		if len(job.Command) == 0 {
+			return true, d.ArgErr()
+		}
+	case "dir":
+		value, err := singleArg(d)
+		if err != nil {
+			return true, err
+		}
+		job.Dir = value
+	case "url":
+		value, err := singleArg(d)
+		if err != nil {
+			return true, err
+		}
+		job.URL = value
+	case "method":
+		value, err := singleArg(d)
+		if err != nil {
+			return true, err
+		}
+		job.Method = value
+	case "header":
+		if !d.NextArg() {
+			return true, d.ArgErr()
+		}
+		name := d.Val()
+		values := d.RemainingArgs()
+		if len(values) == 0 {
+			return true, d.ArgErr()
+		}
+		if job.Headers == nil {
+			job.Headers = make(http.Header)
+		}
+		for _, value := range values {
+			job.Headers.Add(name, value)
+		}
+	case "body":
+		parts := d.RemainingArgs()
+		if len(parts) == 0 {
+			return true, d.ArgErr()
+		}
+		job.Body = strings.Join(parts, " ")
+	case "expect_status":
+		value, err := singleArg(d)
+		if err != nil {
+			return true, err
+		}
+		status, err := strconv.Atoi(value)
+		if err != nil {
+			return true, d.Errf("invalid expect_status %q: %v", value, err)
+		}
+		job.ExpectStatus = status
+	case "insecure_skip_verify":
+		value, err := singleArg(d)
+		if err != nil {
+			return true, err
+		}
+		skip, err := strconv.ParseBool(value)
+		if err != nil {
+			return true, d.Errf("invalid insecure_skip_verify %q: %v", value, err)
+		}
+		job.InsecureSkipVerify = skip
+	case "interval":
+		value, err := singleArg(d)
+		if err != nil {
+			return true, err
+		}
+		dur, err := caddy.ParseDuration(value)
+		if err != nil {
+			return true, d.Errf("invalid duration %s: %v", value, err)
+		}
+		job.Interval = caddy.Duration(dur)
+	case "schedule":
+		value, err := singleArg(d)
+		if err != nil {
+			return true, err
+		}
+		job.Schedule = value
+	case "timeout":
+		value, err := singleArg(d)
+		if err != nil {
+			return true, err
+		}
+		dur, err := caddy.ParseDuration(value)
+		if err != nil {
+			return true, d.Errf("invalid duration %s: %v", value, err)
+		}
+		job.Timeout = caddy.Duration(dur)
+	case "overlap":
+		value, err := singleArg(d)
+		if err != nil {
+			return true, err
+		}
+		if value != OverlapSkip && value != OverlapAllow {
+			return true, d.Errf("invalid overlap %q: expected %q or %q", value, OverlapSkip, OverlapAllow)
+		}
+		job.Overlap = value
+	default:
+		return false, nil
+	}
+	return true, nil
+}
+
+func singleArg(d *caddyfile.Dispenser) (string, error) {
+	if !d.NextArg() {
+		return "", d.ArgErr()
+	}
+	value := d.Val()
+	if d.NextArg() {
+		return "", d.ArgErr()
+	}
+	return value, nil
 }
 
 func parseGlobalOption(d *caddyfile.Dispenser, _ any) (any, error) {
