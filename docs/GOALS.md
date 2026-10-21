@@ -43,11 +43,18 @@ Calling a system command from the web server has three practical costs:
   (`github.com/wangbo5825/scheduler/module`) and update CI/docs.
 - [x] Unit tests for HTTP mode, scheduling, defaults, and validation.
 
+### Unreleased (next)
+
+- [x] Multiple named jobs per process, each with its own mode, schedule,
+  timeout, and overlap options.
+- [x] Backward-compatible single-job configuration (flat Caddyfile fields or
+  top-level JSON fields).
+- [x] Global shutdown grace across all active jobs.
+- [ ] HTTP request retries with backoff and jitter.
+
 ### Future (next milestones)
 
-- Multiple named jobs per process, each with its own mode, schedule, and
-  options (requires turning the app into a job registry).
-- HTTP request retries with backoff and jitter.
+- Per-job shutdown grace periods.
 - Webhook/HMAC signing helpers so trigger endpoints can verify requests.
 - Custom CA bundle / client certificate configuration for internal HTTPS.
 - Prometheus metrics for ticks, durations, and failures.

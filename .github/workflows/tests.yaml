@@ -66,4 +66,5 @@ jobs:
         run: |
           cp frankenphp-linux-x86_64 module/frankenphp
           cd module
+          go test -v -race .
           go test -v -race ./tests/...

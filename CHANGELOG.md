@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Multiple named jobs** in one scheduler instance:
+  - Caddyfile: repeat `job <name> { ... }` blocks.
+  - JSON: use the `jobs` array.
+  - Each job has an independent mode, target, `interval`/`schedule`, `timeout`,
+    and `overlap` policy.
+  - Job names must be unique; the legacy flat single-job configuration remains
+    fully supported.
+  - `shutdown_grace` remains global for all active jobs.
+- Unit tests for multi-job parsing, defaults, validation, JSON compatibility,
+  and independent execution.
+
 ## 0.1.0 (2026-09-06) — wangbo5825 fork
 
 ### Added
