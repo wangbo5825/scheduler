@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-### Added
+### Multi-job support
 
 - **Multiple named jobs** in one scheduler instance:
   - Caddyfile: repeat `job <name> { ... }` blocks.

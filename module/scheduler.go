@@ -88,11 +88,11 @@ func (s *Scheduler) setDefaults(logger *slog.Logger) error {
 	}
 
 	if len(s.Jobs) == 0 {
-		if s.Job.Name == "" {
-			s.Job.Name = "default"
+		if s.Name == "" {
+			s.Name = "default"
 		}
 		if err := s.Job.setDefaults(s.logger); err != nil {
-			return fmt.Errorf("job %q: %w", s.Job.Name, err)
+			return fmt.Errorf("job %q: %w", s.Name, err)
 		}
 		s.jobList = []*Job{&s.Job}
 		return nil
